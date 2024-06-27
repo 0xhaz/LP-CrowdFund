@@ -1,6 +1,33 @@
+# foundry.toml
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
 [profile.default]
 src = "src"
 out = "out"
 libs = ["lib"]
+solc_version = '0.8.25'
+evm_version = "cancun"
+optimizer_runs = 800
+via_ir = false
+ffi = true
 
-# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+[fmt]
+  bracket_spacing = true
+  int_types = "long"
+  line_length = 120
+  multiline_func_header = "all"
+  number_underscore = "thousands"
+  quote_style = "double"
+  tab_width = 4
+  wrap_comments = true
+
+[rpc_endpoints]
+  arbitrum = "https://arbitrum-mainnet.infura.io/v3/${API_KEY_INFURA}"
+  avalanche = "https://avalanche-mainnet.infura.io/v3/${API_KEY_INFURA}"
+  bnb_smart_chain = "https://bsc-dataseed.binance.org"
+  gnosis_chain = "https://rpc.gnosischain.com"
+  localhost = "http://localhost:8545"
+  mainnet = "${RPC_URL_MAINNET}"
+  optimism = "https://optimism-mainnet.infura.io/v3/${API_KEY_INFURA}"
+  polygon = "https://polygon-mainnet.infura.io/v3/${API_KEY_INFURA}"
+  sepolia = "https://sepolia.infura.io/v3/${API_KEY_INFURA}"
