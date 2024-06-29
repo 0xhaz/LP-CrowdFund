@@ -20,6 +20,7 @@ import { CurrencyLibrary, Currency } from "v4-core/types/Currency.sol";
 import { FullMath } from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import { TickMath } from "v4-core/libraries/TickMath.sol";
 import { BalanceDelta } from "v4-core/types/BalanceDelta.sol";
+import { StateLibrary } from "v4-core/libraries/StateLibrary.sol";
 
 // Sablier contracts
 import { ISablierV2LockupLinear } from "@sablier/v2-core/src/interfaces/ISablierV2LockupLinear.sol";
@@ -40,11 +41,14 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
     using SafeERC20 for IERC20;
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
+    using StateLibrary for IPoolManager;
     using SafeCast for uint256;
     using SafeCast for int128;
+    using SafeCast for uint128;
 
     PoolModifyLiquidityTest modifyLiquidityRouter;
     PoolSwapTest swapRouter;
+    IPoolManager poolManager;
 
     struct CallbackData {
         address sender;
@@ -116,6 +120,7 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
         LEAP_FACTORY = _leapFactory;
         phaseTimeStamps = _phaseTimeStamps;
         launchParams = _launchParams;
+        poolManager = _manager;
 
         // check if a new token or a capital raise and set launch token
         // if this a capital raise we also need to transfer the required amount of tokens
@@ -124,6 +129,8 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
             // This is an existing token, so use the existing token name and symbol
             (launchToken.name, launchToken.symbol) =
                 (ERC20(_launchToken.tokenAddress).name(), ERC20(_launchToken.tokenAddress).symbol());
+            // As this is now a cap raise, transfer the require amount of tokens into this contract
+            IERC20(launchToken.tokenAddress).safeTransferFrom(msg.sender, address(this), launchParams.tokenReserve);
         } else {
             // This will be a new token to launch
             (launchToken.name, launchToken.symbol) = (_launchToken.name, _launchToken.symbol);
@@ -166,7 +173,11 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
             beforeSwap: false,
             afterSwap: false,
             beforeDonate: false,
-            afterDonate: false
+            afterDonate: false,
+            beforeSwapReturnDelta: false,
+            afterSwapReturnDelta: false,
+            afterAddLiquidityReturnDelta: false,
+            afterRemoveLiquidityReturnDelta: false
         });
     }
 
@@ -177,14 +188,24 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
         bytes calldata
     )
         external
-        view
+        pure
         override
         returns (bytes4)
     {
         return this.beforeRemoveLiquidity.selector;
     }
 
-    function beforeInitialize(address, PoolKey calldata, uint160, bytes calldata) external override returns (bytes4) {
+    function beforeInitialize(
+        address,
+        PoolKey calldata,
+        uint160,
+        bytes calldata
+    )
+        external
+        pure
+        override
+        returns (bytes4)
+    {
         console2.log("Before Initialize");
         return this.beforeInitialize.selector;
     }
@@ -202,8 +223,8 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
     {
         // Add the liquidity to the pool
         (uint256 amt0, uint256 amt1) = abi.decode(params, (uint256, uint256));
-        if (amt0 > 0 || amt > 0) {
-            _addLiquidity(amt0, amt1);
+        if (amt0 > 0 || amt1 > 0) {
+            _addLiquidityToPool(amt0, amt1);
         }
 
         return this.afterInitialize.selector;
@@ -238,9 +259,9 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
         poolId = poolKey.toId();
 
         // initialize the pool with the provided params
-        IPoolManager.initialize(poolKey, uint160(initialSqrtPriceX96), params);
+        poolManager.initialize(poolKey, uint160(initialSqrtPriceX96), params);
 
-        (uint160 sqrtPriceX96,,,) = IPoolManager.getSlot0(poolId);
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
 
         require(sqrtPriceX96 > 0, "Pool not initialized");
     }
@@ -250,9 +271,9 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
     /// @param amount0 The amount of first token to add as liquidity
     /// @param amount1 The amount of second token to add as liquidity
     function _addLiquidityToPool(uint256 amount0, uint256 amount1) internal {
-        console2.log("Adding liqudity to pool Id, AMTS: %s, %s", poolId, amount0, amount1);
+        console2.log("Adding liqudity to pool Id, AMTS: ");
 
-        (uint160 sqrtPriceX96,,,) = IPoolManager.getSlot0(poolId);
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
 
         // Calculate liquidity for the given amounts
         uint128 liq =
@@ -263,7 +284,9 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
 
         /// @dev we don't need to save position as it is always min - max tick for the tick spacing which is known
         (BalanceDelta delta) = modifyLiquidityRouter.modifyLiquidity{ value: amount0 }(
-            poolKey, IPoolManager.ModifyLiquidityParams(_minUsableTick, _maxUsableTick, int256(int128(liq))), ZERO_BYTES
+            poolKey,
+            IPoolManager.ModifyLiquidityParams(_minUsableTick, _maxUsableTick, int256(int128(liq)), 0),
+            ZERO_BYTES
         );
 
         // we want to store the amount of tokens owed that were not part of the add liquidity function and send these to
@@ -271,8 +294,8 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
         // delta.amount1 and amount0 will always be negative in this case
         owedDelta.amount0 = int128(int256(amount0)) + delta.amount0();
         owedDelta.amount1 = int128(int256(amount1)) + delta.amount1();
-        console2.log("Delta0: %s ", owedDelta.amount0());
-        console2.log("Delta1: %s ", owedDelta.amount1());
+        console2.log("Delta0: %s ", owedDelta.amount0);
+        console2.log("Delta1: %s ", owedDelta.amount1);
 
         console2.log("Liquidity added: %s", liq);
         emit LiquidityAdded(delta.amount0(), delta.amount1());
@@ -282,13 +305,19 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
     /// @notice Transfers the LP to the owner of the contract; they are free to do as they please with this position
     function removeLP() external atPhase(LEAPDataTypes.Phase.DEPLETED) {
         // remove all LP from the pool
-        console2.log("Removing LP from pool Id: %s", poolId);
-        (uint160 sqrtPriceX96,,,) = IPoolManager.getSlot0(poolId);
+        console2.log("Removing LP from pool Id");
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
 
-        (uint128 liquidityToRemove) = IPoolManager.getLiquidity(poolId, address(this), _minUsableTick, _maxUsableTick);
+        uint128 liquidityToRemove = LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPriceX96,
+            _sqrtMinTick,
+            _sqrtMaxTick,
+            uint128(int128(owedDelta.amount0)),
+            uint128(int128(owedDelta.amount1))
+        );
 
         (uint256 amt0, uint256 amt1) =
-            LiquidityAmounts.getAmountsForLiquidity(sqrtPriceX96, _sqrtMinTick, _sqrtMaxTick, liquidityRemove);
+            LiquidityAmounts.getAmountsForLiquidity(sqrtPriceX96, _sqrtMinTick, _sqrtMaxTick, liquidityToRemove);
 
         // add the amounts owed from the add liquidity function
         amt0 += uint256(uint128(owedDelta.amount0));
@@ -297,7 +326,12 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
         // modify the liquidity
         modifyLiquidityRouter.modifyLiquidity(
             poolKey,
-            IPoolManager.ModifyLiquidityParams(_minUsableTick, _maxUsableTick, -(liquidityToRemove.toInt256())),
+            IPoolManager.ModifyLiquidityParams({
+                tickLower: _minUsableTick,
+                tickUpper: _maxUsableTick,
+                liquidityDelta: -(liquidityToRemove.toInt256()),
+                salt: 0
+            }),
             ZERO_BYTES
         );
 
@@ -362,21 +396,31 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
     /// @param vestingAmount is the amount of token to be vested through Sablier
     function _createSablierVestingStream(uint128 vestingAmount) internal virtual returns (uint256 _streamId) {
         // approve the sablier contract to transfer the vesting amount
-        IERC20(launchToken.tokenAddress).safeApprove(address(LOCKUP_LINEAR), vestingAmount);
+        IERC20(launchToken.tokenAddress).approve(address(LOCKUP_LINEAR), vestingAmount);
 
         // Declare the params struct
         LockupLinear.CreateWithDurations memory params;
 
         // Declare the function parameters
-        params.sender = address(this); // the sender will be able to cancel the stream
+        params.sender = msg.sender; // the sender will be able to cancel the stream
         params.recipient = address(this); // the recipient of the streamed assets
         params.totalAmount = vestingAmount; // total amount of amount inclusive of all fees
         params.asset = IERC20(launchToken.tokenAddress); // the asset to be streamed
-        params.cancelable = LockupLinear.Durations({
-            cliff: launchParams.streamCliff, // assets will be unlocked only after stream cliff
-            total: launchParams.streamTotal // setting a total duration for the stream
+        params.cancelable = false; // Whether the stream can be cancelled by the sender
+        params.transferable = true; // Whether the stream can be transferred to another address
+        params.durations = LockupLinear.Durations({
+            cliff: launchParams.streamCliff, // Assets will be unlocked after stream cliff
+            total: launchParams.streamTotal // Setting a total duration of stream total
          });
-        console2.log("Creating the stream with params: %s", params);
+        console2.log("Creating the stream");
+        console2.log("Sender: %s", params.sender);
+        console2.log("Recipient: %s", params.recipient);
+        console2.log("Total Amount: %s", params.totalAmount);
+        console2.log("Cancelable: %s", params.cancelable);
+        console2.log("Transferable: %s", params.transferable);
+        console2.log("Cliff: %s", params.durations.cliff);
+        console2.log("Total: %s", params.durations.total);
+
         // Createh LockupLinear stream using a function that sets the start time to
         // this also transfers the vesting asset to the stream
         _streamId = LOCKUP_LINEAR.createWithDurations(params);
@@ -455,4 +499,36 @@ abstract contract LeapBase is BaseHook, ERC20, ILeapEvent {
     /// @dev The receive function is a callback function triggered when the contract receives ether without data
     /// It is marked `external` and `payable` to allow the contract to receive ether
     receive() external payable { }
+
+    /*//////////////////////////////////////////////////////////////////////////
+                           INTERNAL CONSTANT FUNCTIONS
+    //////////////////////////////////////////////////////////////////////////*/
+
+    /// @notice The current phase the auction is in
+    /// @return The current phase from LEAPDataTypes.Phase
+    function currentPhase() public view returns (LEAPDataTypes.Phase) {
+        uint256 currentTime = block.timestamp;
+
+        if (phaseTimeStamps.launchEventStart == 0 || currentTime < phaseTimeStamps.launchEventStart) {
+            return LEAPDataTypes.Phase.NOT_STARTED;
+        }
+
+        if (currentTime < phaseTimeStamps.depositPhaseEnd) {
+            return LEAPDataTypes.Phase.PHASE_DEPOSIT;
+        }
+
+        if (currentTime < phaseTimeStamps.phaseOneEnd) {
+            return LEAPDataTypes.Phase.PHASE_ONE;
+        }
+
+        if (currentTime < phaseTimeStamps.phaseTwoEnd) {
+            return LEAPDataTypes.Phase.PHASE_TWO;
+        }
+
+        if (currentTime < phaseTimeStamps.phaseThreeEnd) {
+            return LEAPDataTypes.Phase.PHASE_THREE;
+        }
+
+        return LEAPDataTypes.Phase.DEPLETED;
+    }
 }
